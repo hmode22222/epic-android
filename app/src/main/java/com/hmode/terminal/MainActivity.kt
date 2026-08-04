@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -15,19 +16,25 @@ import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.TextView
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import java.io.File
+import java.io.IOException
 
 class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
 
     companion object {
         private const val TAG = "EpicTerminal"
+        private const val BUSYBOX_ASSET_DIR = "busybox"
+        private const val BUSYBOX_NAME = "busybox"
     }
 
     private lateinit var terminalView: TerminalView
-    private lateinit var terminalSession: TerminalSession
+    private lateinit var errorView: TextView
+    private var terminalSession: TerminalSession? = null
 
     @Volatile
     private var ctrlDown = false
@@ -39,25 +46,28 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
+        val root = LinearLayout(this)
+        root.orientation = LinearLayout.VERTICAL
+        root.setBackgroundColor(Color.BLACK)
+
+        errorView = TextView(this)
+        errorView.setTextColor(Color.parseColor("#ff5555"))
+        errorView.textSize = 12f
+        errorView.setPadding(24, 24, 24, 24)
+        errorView.visibility = View.GONE
+        root.addView(
+            errorView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
         terminalView = TerminalView(this, null)
         terminalView.setTerminalViewClient(this)
         terminalView.setTextSize(18)
         terminalView.isFocusable = true
         terminalView.isFocusableInTouchMode = true
-
-        terminalSession = TerminalSession(
-            "/system/bin/sh",
-            filesDir.absolutePath,
-            arrayOf(),
-            buildEnvironment(),
-            5000,
-            this
-        )
-
-        val root = LinearLayout(this)
-        root.orientation = LinearLayout.VERTICAL
-        root.setBackgroundColor(Color.BLACK)
-
         terminalView.layoutParams = LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             0,
@@ -69,37 +79,112 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
 
         setContentView(root)
 
-        terminalView.attachSession(terminalSession)
-
-        terminalView.post {
-            terminalView.requestFocus()
-            val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+        try {
+            setupTerminal()
+            terminalView.post {
+                terminalView.requestFocus()
+                val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT)
+            }
+        } catch (e: Exception) {
+            showStartupError(e)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::terminalSession.isInitialized) {
-            terminalSession.finishIfRunning()
-        }
+        terminalSession?.finishIfRunning()
     }
 
-    private fun buildEnvironment(): Array<String> {
-        val home = filesDir.absolutePath
-        return arrayOf(
+    /**
+     * Extract busybox into app-private storage, install its applets and start a shell
+     * session running busybox ash inside the emulated terminal.
+     */
+    private fun setupTerminal() {
+        val busyboxPath = extractBusybox()
+
+        val homeDir = File(filesDir, "home")
+        val binDir = File(filesDir, "bin")
+        val tmpDir = File(filesDir, "tmp")
+        val etcDir = File(filesDir, "etc")
+        homeDir.mkdirs()
+        binDir.mkdirs()
+        tmpDir.mkdirs()
+        etcDir.mkdirs()
+
+        val profile = File(etcDir, "profile")
+        writeProfile(profile)
+
+        val install = ProcessBuilder(busyboxPath, "--install", "-s", binDir.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val installOutput = install.inputStream.readBytes()
+        install.waitFor()
+        if (install.exitValue() != 0) {
+            Log.w(TAG, "busybox --install failed: " + String(installOutput))
+        }
+
+        val home = homeDir.absolutePath
+        val env = arrayOf(
             "HOME=$home",
             "TERM=xterm-256color",
-            "PATH=/sbin:/system/sbin:/system/bin:/system/xbin",
+            "PATH=${binDir.absolutePath}:/system/bin:/system/xbin:/sbin",
             "ANDROID_ROOT=/system",
             "ANDROID_DATA=/data",
             "ANDROID_STORAGE=/storage",
-            "EXTERNAL_STORAGE=/sdcard",
-            "SHELL=/system/bin/sh",
+            "EXTERNAL_STORAGE=/storage/emulated/0",
+            "SHELL=$busyboxPath",
             "LANG=en_US.UTF-8",
             "PWD=$home",
-            "TMPDIR=$home/cache"
+            "TMPDIR=${tmpDir.absolutePath}",
+            "ENV=${profile.absolutePath}"
         )
+
+        val session = TerminalSession(busyboxPath, home, arrayOf("sh"), env, 5000, this)
+        terminalSession = session
+        terminalView.attachSession(session)
+    }
+
+    /** Copy the static busybox binary matching the device ABI out of assets. */
+    private fun extractBusybox(): String {
+        val dest = File(filesDir, BUSYBOX_NAME)
+        if (dest.isFile && dest.length() > 100000L) {
+            return dest.absolutePath
+        }
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { assetExists("$BUSYBOX_ASSET_DIR/$it/$BUSYBOX_NAME") }
+            ?: throw IOException("No busybox binary for ABIs: ${Build.SUPPORTED_ABIS.joinToString()}")
+        dest.parentFile?.mkdirs()
+        assets.open("$BUSYBOX_ASSET_DIR/$abi/$BUSYBOX_NAME").use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!dest.setExecutable(true, false)) {
+            throw IOException("Failed to make $dest executable")
+        }
+        return dest.absolutePath
+    }
+
+    private fun assetExists(path: String): Boolean = try {
+        assets.open(path).use { }
+        true
+    } catch (e: IOException) {
+        false
+    }
+
+    private fun writeProfile(profile: File) {
+        profile.writeText(
+            "# Epic Terminal profile, sourced by busybox ash on interactive shell start.\n" +
+                "export PS1='\\u@\\h:\\w\\\$ '\n" +
+                "alias ll='ls -l'\n" +
+                "alias la='ls -la'\n" +
+                "alias grep='grep --color'\n"
+        )
+    }
+
+    private fun showStartupError(e: Exception) {
+        Log.e(TAG, "Failed to start terminal", e)
+        terminalView.visibility = View.GONE
+        errorView.text = "Failed to start terminal:\n\n${Log.getStackTraceString(e)}"
+        errorView.visibility = View.VISIBLE
     }
 
     private fun createExtraKeysBar(): View {
@@ -123,10 +208,10 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         }
 
         val escKey = addKey("ESC")
-        escKey.setOnClickListener { terminalSession.write("\u001b") }
+        escKey.setOnClickListener { terminalSession?.write("\u001b") }
 
         val tabKey = addKey("TAB")
-        tabKey.setOnClickListener { terminalSession.write("\t") }
+        tabKey.setOnClickListener { terminalSession?.write("\t") }
 
         val ctrlButton = addKey("CTRL")
         ctrlButton.setOnClickListener {
@@ -141,22 +226,22 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         }
 
         val upKey = addKey("\u2191")
-        upKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_UP, 0) }
+        upKey.setOnClickListener { terminalSession?.let { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_UP, 0) } }
 
         val downKey = addKey("\u2193")
-        downKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_DOWN, 0) }
+        downKey.setOnClickListener { terminalSession?.let { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_DOWN, 0) } }
 
         val leftKey = addKey("\u2190")
-        leftKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_LEFT, 0) }
+        leftKey.setOnClickListener { terminalSession?.let { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_LEFT, 0) } }
 
         val rightKey = addKey("\u2192")
-        rightKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
+        rightKey.setOnClickListener { terminalSession?.let { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) } }
 
         val pipeKey = addKey("|")
-        pipeKey.setOnClickListener { terminalSession.write("|") }
+        pipeKey.setOnClickListener { terminalSession?.write("|") }
 
         val ampKey = addKey("&")
-        ampKey.setOnClickListener { terminalSession.write("&") }
+        ampKey.setOnClickListener { terminalSession?.write("&") }
 
         return bar
     }

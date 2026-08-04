@@ -1,0 +1,10 @@
+This directory vendors the Termux terminal libraries from
+https://github.com/termux/termux-app (tag v0.118.0, commit 6e2689f), used under
+the GPL-3.0 license.
+
+- terminal-emulator/  -> terminal-emulator/src/main of termux-app (includes the
+                         NDK sources for libtermux.so under src/main/jni)
+- terminal-view/      -> terminal-view/src/main of termux-app
+
+The build files in this directory were written for this project and do not come
+from termux-app.
