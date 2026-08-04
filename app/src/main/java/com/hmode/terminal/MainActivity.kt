@@ -7,6 +7,7 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
 import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
@@ -28,13 +29,23 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
 
     companion object {
         private const val TAG = "EpicTerminal"
+
         private const val BUSYBOX_ASSET_DIR = "busybox"
         private const val BUSYBOX_NAME = "busybox"
+
+        private const val PROOT_ASSET_DIR = "proot"
+        private const val PROOT_NAME = "proot"
+
+        private const val ROOTFS_ASSET_DIR = "rootfs"
+        private const val ROOTFS_TARBALL = "alpine.tar.gz"
+
+        private const val QUICK_EXIT_MS = 15000L
     }
 
     private lateinit var terminalView: TerminalView
     private lateinit var errorView: TextView
     private var terminalSession: TerminalSession? = null
+    private var sessionStartedAt = 0L
 
     @Volatile
     private var ctrlDown = false
@@ -45,6 +56,19 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+
+        val previousHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                File(filesDir, "crash.log").writeText(Log.getStackTraceString(throwable))
+            } catch (_: Exception) {
+            }
+            if (previousHandler != null) {
+                previousHandler.uncaughtException(thread, throwable)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
@@ -97,12 +121,67 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
     }
 
     /**
-     * Extract busybox into app-private storage, install its applets and start a shell
-     * session running busybox ash inside the emulated terminal.
+     * Start a terminal session. The preferred setup is proot + Alpine minirootfs which gives a
+     * real Linux environment (with apk package manager). If that is not available for the device
+     * ABI (or fails), fall back to plain busybox ash.
      */
     private fun setupTerminal() {
+        logToFile("=== startup " + java.text.SimpleDateFormat("HH:mm:ss").format(java.util.Date()) + " ===")
         val busyboxPath = extractBusybox()
+        logToFile("busybox at $busyboxPath")
+        try {
+            if (setupProotTerminal(busyboxPath)) {
+                logToFile("proot terminal started")
+                return
+            }
+            logToFile("proot not available for this ABI, using busybox")
+        } catch (e: Exception) {
+            logToFile("proot setup failed: $e")
+            Log.w(TAG, "proot setup failed, falling back to busybox", e)
+        }
+        setupBusyboxTerminal(busyboxPath)
+        logToFile("busybox terminal started")
+    }
 
+    /** Run the Alpine rootfs under proot. Returns false if no proot binary for this ABI. */
+    private fun setupProotTerminal(busyboxPath: String): Boolean {
+        val prootPath = extractProot() ?: return false
+        logToFile("proot at $prootPath")
+
+        val rootfs = extractRootfs(busyboxPath)
+        logToFile("rootfs at ${rootfs.absolutePath}")
+
+        val prootTmpDir = File(filesDir, "proot_tmp")
+        prootTmpDir.mkdirs()
+
+        val env = arrayOf(
+            "HOME=/root",
+            "TERM=xterm-256color",
+            "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "SHELL=/bin/sh",
+            "LANG=C.UTF-8",
+            "PWD=/root",
+            "TMPDIR=/tmp",
+            "PROOT_TMP_DIR=${prootTmpDir.absolutePath}"
+        )
+
+        val args = arrayOf(
+            "--link2symlink",
+            "-0",
+            "-r", rootfs.absolutePath,
+            "-b", "/dev",
+            "-b", "/proc",
+            "-b", "/sys",
+            "-w", "/root",
+            "/bin/sh"
+        )
+
+        startSession(prootPath, args, File(rootfs, "root").absolutePath, env)
+        return true
+    }
+
+    /** Plain busybox ash terminal, used when proot is not available. */
+    private fun setupBusyboxTerminal(busyboxPath: String) {
         val homeDir = File(filesDir, "home")
         val binDir = File(filesDir, "bin")
         val tmpDir = File(filesDir, "tmp")
@@ -112,8 +191,7 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         tmpDir.mkdirs()
         etcDir.mkdirs()
 
-        val profile = File(etcDir, "profile")
-        writeProfile(profile)
+        writeProfile(File(etcDir, "profile"))
 
         val install = ProcessBuilder(busyboxPath, "--install", "-s", binDir.absolutePath)
             .redirectErrorStream(true)
@@ -137,10 +215,15 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
             "LANG=en_US.UTF-8",
             "PWD=$home",
             "TMPDIR=${tmpDir.absolutePath}",
-            "ENV=${profile.absolutePath}"
+            "ENV=${File(etcDir, "profile").absolutePath}"
         )
 
-        val session = TerminalSession(busyboxPath, home, arrayOf("sh"), env, 5000, this)
+        startSession(busyboxPath, arrayOf("sh"), home, env)
+    }
+
+    private fun startSession(cmd: String, args: Array<String>, cwd: String, env: Array<String>) {
+        sessionStartedAt = SystemClock.uptimeMillis()
+        val session = TerminalSession(cmd, cwd, args, env, 5000, this)
         terminalSession = session
         terminalView.attachSession(session)
     }
@@ -160,7 +243,61 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         if (!dest.setExecutable(true, false)) {
             throw IOException("Failed to make $dest executable")
         }
+        logToFile("extracted busybox for $abi")
         return dest.absolutePath
+    }
+
+    /** Copy the static proot binary matching the device ABI, or null if none exists. */
+    private fun extractProot(): String? {
+        val dest = File(filesDir, PROOT_NAME)
+        if (dest.isFile && dest.length() > 500000L) {
+            return dest.absolutePath
+        }
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { assetExists("$PROOT_ASSET_DIR/$it/$PROOT_NAME") }
+            ?: return null
+        dest.parentFile?.mkdirs()
+        assets.open("$PROOT_ASSET_DIR/$abi/$PROOT_NAME").use { input ->
+            dest.outputStream().use { output -> input.copyTo(output) }
+        }
+        if (!dest.setExecutable(true, false)) {
+            throw IOException("Failed to make $dest executable")
+        }
+        logToFile("extracted proot for $abi")
+        return dest.absolutePath
+    }
+
+    /** Extract the Alpine minirootfs for the device ABI into filesDir/rootfs. */
+    private fun extractRootfs(busyboxPath: String): File {
+        val rootfs = File(filesDir, "rootfs")
+        val marker = File(rootfs, "etc/alpine-release")
+        if (marker.isFile) {
+            return rootfs
+        }
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { assetExists("$ROOTFS_ASSET_DIR/$it/$ROOTFS_TARBALL") }
+            ?: throw IOException("No rootfs for ABIs: ${Build.SUPPORTED_ABIS.joinToString()}")
+
+        val tarball = File(filesDir, ROOTFS_TARBALL)
+        assets.open("$ROOTFS_ASSET_DIR/$abi/$ROOTFS_TARBALL").use { input ->
+            tarball.outputStream().use { output -> input.copyTo(output) }
+        }
+        rootfs.mkdirs()
+
+        val extract = ProcessBuilder(busyboxPath, "tar", "-xzf", tarball.absolutePath, "-C", rootfs.absolutePath)
+            .redirectErrorStream(true)
+            .start()
+        val extractOutput = extract.inputStream.readBytes()
+        extract.waitFor()
+        tarball.delete()
+
+        if (extract.exitValue() != 0) {
+            throw IOException("rootfs extraction failed: " + String(extractOutput))
+        }
+        if (!marker.isFile) {
+            throw IOException("rootfs extraction produced no etc/alpine-release")
+        }
+        File(rootfs, "etc/resolv.conf").writeText("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+        logToFile("extracted rootfs for $abi")
+        return rootfs
     }
 
     private fun assetExists(path: String): Boolean = try {
@@ -178,6 +315,13 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
                 "alias la='ls -la'\n" +
                 "alias grep='grep --color'\n"
         )
+    }
+
+    private fun logToFile(message: String) {
+        try {
+            File(filesDir, "startup.log").appendText(message + "\n")
+        } catch (_: Exception) {
+        }
     }
 
     private fun showStartupError(e: Exception) {
@@ -264,6 +408,23 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
     }
 
     override fun onSessionFinished(finishedSession: TerminalSession) {
+        val quickExit = SystemClock.uptimeMillis() - sessionStartedAt < QUICK_EXIT_MS
+        runOnUiThread {
+            if (quickExit && terminalSession == finishedSession) {
+                val emulator = finishedSession.emulator
+                val lastOutput = if (emulator != null) {
+                    try {
+                        emulator.screen.getSelectedText(0, 0, emulator.mColumns, emulator.mRows)
+                    } catch (e: Exception) {
+                        ""
+                    }
+                } else {
+                    ""
+                }
+                errorView.text = "Shell exited (status ${finishedSession.exitStatus}):\n$lastOutput"
+                errorView.visibility = View.VISIBLE
+            }
+        }
     }
 
     override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
