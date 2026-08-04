@@ -9,10 +9,16 @@ android {
 
     defaultConfig {
         applicationId 'com.hmode.terminalapp'
-        minSdk 23
+        minSdk 24
         targetSdk 35
         versionCode 1
         versionName '1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
     }
 
     compileOptions {
@@ -23,4 +29,9 @@ android {
 
 kotlin {
     jvmToolchain(17)
+}
+
+dependencies {
+    implementation 'com.termux.termux-app:terminal-view:0.118.0'
+    implementation 'androidx.annotation:annotation:1.9.0'
 }
