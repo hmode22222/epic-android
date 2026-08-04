@@ -111,37 +111,52 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         val buttonParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         buttonParams.setMargins(2, 6, 2, 6)
 
-        fun addKey(label: String, onTap: () -> Unit): Button {
+        fun addKey(label: String): Button {
             val button = Button(this)
             button.text = label
             button.textSize = 13f
             button.isAllCaps = false
             button.setTextColor(Color.parseColor("#e8e8e8"))
             button.setBackgroundColor(Color.parseColor("#1f2730"))
-            button.setOnClickListener { onTap() }
             bar.addView(button, buttonParams)
             return button
         }
 
-        addKey("ESC") { terminalSession.write("\u001b") }
-        addKey("TAB") { terminalSession.write("\t") }
+        val escKey = addKey("ESC")
+        escKey.setOnClickListener { terminalSession.write("\u001b") }
 
-        val ctrlButton = addKey("CTRL") {
+        val tabKey = addKey("TAB")
+        tabKey.setOnClickListener { terminalSession.write("\t") }
+
+        val ctrlButton = addKey("CTRL")
+        ctrlButton.setOnClickListener {
             ctrlDown = !ctrlDown
             paintToggle(ctrlButton, ctrlDown)
         }
-        val altButton = addKey("ALT") {
+
+        val altButton = addKey("ALT")
+        altButton.setOnClickListener {
             altDown = !altDown
             paintToggle(altButton, altDown)
         }
 
-        addKey("\u2191") { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_UP, 0) }
-        addKey("\u2193") { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_DOWN, 0) }
-        addKey("\u2190") { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_LEFT, 0) }
-        addKey("\u2192") { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
+        val upKey = addKey("\u2191")
+        upKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_UP, 0) }
 
-        addKey("|") { terminalSession.write("|") }
-        addKey("&") { terminalSession.write("&") }
+        val downKey = addKey("\u2193")
+        downKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_DOWN, 0) }
+
+        val leftKey = addKey("\u2190")
+        leftKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_LEFT, 0) }
+
+        val rightKey = addKey("\u2192")
+        rightKey.setOnClickListener { terminalView.handleKeyCode(KeyEvent.KEYCODE_DPAD_RIGHT, 0) }
+
+        val pipeKey = addKey("|")
+        pipeKey.setOnClickListener { terminalSession.write("|") }
+
+        val ampKey = addKey("&")
+        ampKey.setOnClickListener { terminalSession.write("&") }
 
         return bar
     }
@@ -199,20 +214,33 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
 
     override fun getTerminalCursorStyle(): Int? = null
 
-    override fun logError(tag: String, message: String) = Log.e(tag, message)
+    override fun logError(tag: String, message: String) {
+        Log.e(tag, message)
+    }
 
-    override fun logWarn(tag: String, message: String) = Log.w(tag, message)
+    override fun logWarn(tag: String, message: String) {
+        Log.w(tag, message)
+    }
 
-    override fun logInfo(tag: String, message: String) = Log.i(tag, message)
+    override fun logInfo(tag: String, message: String) {
+        Log.i(tag, message)
+    }
 
-    override fun logDebug(tag: String, message: String) = Log.d(tag, message)
+    override fun logDebug(tag: String, message: String) {
+        Log.d(tag, message)
+    }
 
-    override fun logVerbose(tag: String, message: String) = Log.v(tag, message)
+    override fun logVerbose(tag: String, message: String) {
+        Log.v(tag, message)
+    }
 
-    override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) =
+    override fun logStackTraceWithMessage(tag: String, message: String, e: Exception) {
         Log.e(tag, message, e)
+    }
 
-    override fun logStackTrace(tag: String, e: Exception) = Log.e(tag, Log.getStackTraceString(e))
+    override fun logStackTrace(tag: String, e: Exception) {
+        Log.e(tag, Log.getStackTraceString(e))
+    }
 
     // ---------------------------------------------------------------------
     // TerminalViewClient
