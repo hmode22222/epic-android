@@ -37,7 +37,6 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         private const val PROOT_NAME = "proot"
 
         private const val ROOTFS_ASSET_DIR = "rootfs"
-        private const val ROOTFS_TARBALL = "alpine.tar.gz"
 
         private const val QUICK_EXIT_MS = 15000L
     }
@@ -273,16 +272,25 @@ class MainActivity : Activity(), TerminalSessionClient, TerminalViewClient {
         if (marker.isFile) {
             return rootfs
         }
-        val abi = Build.SUPPORTED_ABIS.firstOrNull { assetExists("$ROOTFS_ASSET_DIR/$it/$ROOTFS_TARBALL") }
-            ?: throw IOException("No rootfs for ABIs: ${Build.SUPPORTED_ABIS.joinToString()}")
+        val abi = Build.SUPPORTED_ABIS.firstOrNull { abi ->
+            assets.list("$ROOTFS_ASSET_DIR/$abi")?.isNotEmpty() == true
+        } ?: throw IOException("No rootfs for ABIs: ${Build.SUPPORTED_ABIS.joinToString()}")
 
-        val tarball = File(filesDir, ROOTFS_TARBALL)
-        assets.open("$ROOTFS_ASSET_DIR/$abi/$ROOTFS_TARBALL").use { input ->
+        val assetDir = "$ROOTFS_ASSET_DIR/$abi"
+        val assetNames = assets.list(assetDir)
+        logToFile("rootfs assets for $abi: ${assetNames?.joinToString()}")
+        val assetName = (assetNames ?: emptyArray()).firstOrNull { it.startsWith("alpine") }
+            ?: throw IOException("No alpine rootfs asset in $assetDir")
+
+        val tarball = File(filesDir, "alpine.tar")
+        assets.open("$assetDir/$assetName").use { input ->
             tarball.outputStream().use { output -> input.copyTo(output) }
         }
+        logToFile("rootfs archive at ${tarball.absolutePath} (${tarball.length()} bytes)")
         rootfs.mkdirs()
 
-        val extract = ProcessBuilder(busyboxPath, "tar", "-xzf", tarball.absolutePath, "-C", rootfs.absolutePath)
+        val zFlag = if (assetName.endsWith(".gz")) "-xzf" else "-xf"
+        val extract = ProcessBuilder(busyboxPath, "tar", zFlag, tarball.absolutePath, "-C", rootfs.absolutePath)
             .redirectErrorStream(true)
             .start()
         val extractOutput = extract.inputStream.readBytes()
